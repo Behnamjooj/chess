@@ -441,16 +441,17 @@
         }
         .online-block input[type="text"]:focus { border-color: var(--accent-color); }
         .online-block input.code-input {
-            letter-spacing: 3px;
+            letter-spacing: 1px;
             font-family: monospace;
             direction: ltr;
-            text-transform: uppercase;
+            text-transform: none;
         }
         .online-hint { font-size: 0.75rem; color: #aaa; line-height: 1.7; text-align: center; }
         .code-display {
             font-family: monospace;
-            font-size: 1.6rem;
-            letter-spacing: 5px;
+            font-size: 1.3rem;
+            letter-spacing: 2px;
+            word-break: break-all;
             color: var(--accent-color);
             text-align: center;
             direction: ltr;
@@ -673,15 +674,28 @@
                 </div>
                 <div style="height:8px"></div>
                 <div class="controls-row">
-                    <button class="btn-secondary" onclick="onlineCreateRoom()">🎮 ساخت اتاق</button>
-                    <button class="btn-secondary" onclick="onlineShowJoin()">🔗 ورود با کد</button>
+                    <button class="btn-secondary" onclick="onlineShowCreate()">🎮 ساخت اتاق</button>
+                    <button class="btn-secondary" onclick="onlineShowJoin()">🔗 ورود به اتاق</button>
+                </div>
+            </div>
+
+            <div id="online-step-create" style="display:none">
+                <div class="control-group">
+                    <label>یوزرنیم اتاق (این را به دوستتان می‌دهید):</label>
+                    <input type="text" id="room-username-input" class="code-input" maxlength="20" placeholder="مثلاً behnam" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+                </div>
+                <div class="online-hint" style="margin-top:6px">۳ تا ۲۰ کاراکتر؛ فقط حروف انگلیسی، عدد، خط تیره (-) و زیرخط (_). حروف بزرگ و کوچک یکسان‌اند. خالی بگذارید تا خودکار ساخته شود.</div>
+                <div style="height:8px"></div>
+                <div class="controls-row">
+                    <button class="btn-primary" onclick="onlineCreateRoom()">ساخت اتاق</button>
+                    <button onclick="onlineBackToStart()">بازگشت</button>
                 </div>
             </div>
 
             <div id="online-step-join" style="display:none">
                 <div class="control-group">
-                    <label>کدی که دوستتان فرستاده:</label>
-                    <input type="text" id="join-code-input" class="code-input" maxlength="6" placeholder="------" autocomplete="off" autocapitalize="characters">
+                    <label>یوزرنیم اتاقی که دوستتان ساخته:</label>
+                    <input type="text" id="join-code-input" class="code-input" maxlength="20" placeholder="مثلاً behnam" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
                 </div>
                 <div style="height:8px"></div>
                 <div class="controls-row">
@@ -691,11 +705,11 @@
             </div>
 
             <div id="online-step-wait" style="display:none">
-                <div class="online-hint">این کد را (مثلاً با واتساپ) برای دوستتان بفرستید و منتظر بمانید:</div>
+                <div class="online-hint">این یوزرنیم را (مثلاً با واتساپ) برای دوستتان بفرستید و منتظر بمانید:</div>
                 <div class="code-display" id="room-code-display">------</div>
                 <div style="height:8px"></div>
                 <div class="controls-row">
-                    <button class="btn-secondary" onclick="onlineCopyCode()">📋 کپی کد</button>
+                    <button class="btn-secondary" onclick="onlineCopyCode()">📋 کپی یوزرنیم</button>
                     <button class="btn-secondary" onclick="onlineShareCode()">📤 اشتراک</button>
                 </div>
                 <div class="online-hint" id="wait-status" style="margin-top:6px">⏳ در انتظار اتصال حریف...</div>
@@ -1972,7 +1986,7 @@ function findBestMove(engine, level) {
     }
 
     function showOnlineStep(step) {
-        ['name', 'join', 'wait', 'playing'].forEach(k => {
+        ['name', 'create', 'join', 'wait', 'playing'].forEach(k => {
             $id('online-step-' + k).style.display = (k === step) ? '' : 'none';
         });
     }
@@ -1989,14 +2003,30 @@ function findBestMove(engine, level) {
         return n;
     }
 
-    // Unambiguous alphabet (no 0/O, 1/I/L)
+    // Unambiguous alphabet (no 0/O, 1/I/L) – used only when the host leaves the username empty
     function genRoomCode() {
-        const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        const A = 'abcdefghjkmnpqrstuvwxyz23456789';
         let out = '';
         const arr = new Uint32Array(6);
         (window.crypto || window.msCrypto).getRandomValues(arr);
         for (let i = 0; i < 6; i++) out += A[arr[i] % A.length];
         return out;
+    }
+
+    // Room usernames become part of a PeerJS id. PeerJS only accepts ids of the form
+    // alnum-run (single [_-] separator) alnum-run..., so normalise so both sides always agree.
+    const ROOM_MIN = 3, ROOM_MAX = 20;
+    function normRoomName(raw) {
+        return String(raw || '').toLowerCase()
+            .replace(/\s+/g, '-')
+            .replace(/[^a-z0-9_-]/g, '')
+            .replace(/[_-]{2,}/g, m => m[0])
+            .replace(/^[_-]+|[_-]+$/g, '');
+    }
+    function roomNameProblem(name) {
+        if (name.length < ROOM_MIN) return 'یوزرنیم اتاق باید حداقل ۳ کاراکتر باشد و فقط شامل حروف انگلیسی، عدد، - و _ باشد (فارسی پذیرفته نمی‌شود).';
+        if (name.length > ROOM_MAX) return 'یوزرنیم اتاق حداکثر ۲۰ کاراکتر می‌تواند باشد.';
+        return '';
     }
 
     function ensurePeerLib() {
@@ -2008,14 +2038,27 @@ function findBestMove(engine, level) {
     }
 
     // ---------- Host ----------
+    function onlineShowCreate() {
+        onlineError('');
+        if (!readMyName()) return;
+        showOnlineStep('create');
+        $id('room-username-input').focus();
+    }
+
     function onlineCreateRoom(retry) {
         onlineError('');
         if (!readMyName()) return;
         if (!ensurePeerLib()) return;
+        const rawRoom = ($id('room-username-input').value || '').trim();
+        const customRoom = rawRoom.length > 0;
+        const code = customRoom ? normRoomName(rawRoom) : genRoomCode();
+        if (customRoom) {
+            const problem = roomNameProblem(code);
+            if (problem) { onlineError(problem); showOnlineStep('create'); return; }
+        }
         onlineTeardown(true);
         isHost = true;
         myColor = 'w';
-        const code = genRoomCode();
         $id('room-code-display').innerText = code;
         $id('wait-status').innerText = '⏳ در حال ایجاد اتاق...';
         showOnlineStep('wait');
@@ -2029,11 +2072,17 @@ function findBestMove(engine, level) {
             attachConn(c);
         });
         peer.on('error', (err) => {
-            if (err && err.type === 'unavailable-id' && (retry || 0) < 3) {
-                onlineCreateRoom((retry || 0) + 1);      // rare collision → new code
+            if (err && err.type === 'unavailable-id') {
+                if (!customRoom && (retry || 0) < 3) {
+                    onlineCreateRoom((retry || 0) + 1);  // rare collision of an auto-generated name → new one
+                    return;
+                }
+                onlineTeardown(true);
+                onlineError('این یوزرنیم همین الان توسط شخص دیگری استفاده می‌شود؛ یکی دیگر انتخاب کنید. (اگر خودتان بودید و تازه صفحه را بستید، حدود یک دقیقه صبر کنید.)');
+                showOnlineStep('create');
                 return;
             }
-            handlePeerError(err);
+            handlePeerError(err, 'create');
         });
         peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
     }
@@ -2051,8 +2100,9 @@ function findBestMove(engine, level) {
         onlineError('');
         if (!readMyName()) return;
         if (!ensurePeerLib()) return;
-        const code = ($id('join-code-input').value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-        if (code.length !== 6) { onlineError('کد باید ۶ کاراکتر باشد.'); return; }
+        const code = normRoomName($id('join-code-input').value);
+        const problem = roomNameProblem(code);
+        if (problem) { onlineError(problem); return; }
         onlineTeardown(true);
         isHost = false;
         myColor = 'b';
@@ -2064,7 +2114,7 @@ function findBestMove(engine, level) {
             clearConnectTimer();
             connectTimer = setTimeout(() => {
                 if (!onlineActive) {
-                    onlineError('اتصال برقرار نشد. کد را بررسی کنید یا مطمئن شوید میزبان صفحه را باز نگه داشته است.');
+                    onlineError('اتصال برقرار نشد. یوزرنیم را بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.');
                     onlineTeardown(true); showOnlineStep('join');
                 }
             }, 15000);
@@ -2075,10 +2125,11 @@ function findBestMove(engine, level) {
     let connectTimer = null;
     function clearConnectTimer() { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } }
 
-    function handlePeerError(err) {
+    function handlePeerError(err, hostStep) {
         const type = err && err.type;
         let msg = 'خطای اتصال: ' + (type || 'نامشخص');
-        if (type === 'peer-unavailable') msg = 'اتاقی با این کد پیدا نشد. کد را دوباره بررسی کنید.';
+        if (type === 'peer-unavailable') msg = 'اتاقی با این یوزرنیم پیدا نشد. یوزرنیم را دوباره بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.';
+        else if (type === 'invalid-id') msg = 'یوزرنیم اتاق پذیرفته نشد؛ فقط از حروف انگلیسی، عدد، - و _ استفاده کنید.';
         else if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed')
             msg = 'ارتباط با سرور برقرار نشد. اینترنت/VPN را بررسی کنید.';
         else if (type === 'browser-incompatible') msg = 'مرورگر شما از WebRTC پشتیبانی نمی‌کند.';
@@ -2086,7 +2137,7 @@ function findBestMove(engine, level) {
         if (!onlineActive) {
             const wasHost = isHost;
             onlineTeardown(true);
-            showOnlineStep(wasHost ? 'name' : 'join');
+            showOnlineStep(wasHost ? 'create' : 'join');
         }
     }
 
@@ -2350,7 +2401,7 @@ function findBestMove(engine, level) {
     // ---------- Clipboard / share ----------
     function onlineCopyCode() {
         const code = $id('room-code-display').innerText;
-        const done = () => { $id('wait-status').innerText = '✅ کد کپی شد. آن را برای دوستتان بفرستید.'; };
+        const done = () => { $id('wait-status').innerText = '✅ یوزرنیم کپی شد. آن را برای دوستتان بفرستید.'; };
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(code).then(done).catch(() => fallbackCopy(code, done));
         } else fallbackCopy(code, done);
@@ -2364,7 +2415,7 @@ function findBestMove(engine, level) {
     function onlineShareCode() {
         const code = $id('room-code-display').innerText;
         const url = location.href.split('#')[0].split('?')[0] + '?room=' + code;
-        const text = `بیا شطرنج بازی کنیم! ♟\nکد اتاق: ${code}\nلینک: ${url}`;
+        const text = `بیا شطرنج بازی کنیم! ♟\nیوزرنیم اتاق: ${code}\nلینک: ${url}`;
         if (navigator.share) {
             navigator.share({ title: 'شطرنج آنلاین', text: text }).catch(() => {});
         } else {
@@ -2404,12 +2455,12 @@ function findBestMove(engine, level) {
         try { const n = localStorage.getItem('chess_my_name'); if (n) $id('my-name-input').value = n; } catch (e) {}
         const q = new URLSearchParams(location.search).get('room');
         if (q) {
-            const code = q.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+            const code = normRoomName(q).slice(0, ROOM_MAX);
             $id('game-mode').value = 'online';
             $id('join-code-input').value = code;
             onModeChange();
             showOnlineStep('name');
-            onlineError('کد اتاق وارد شد؛ نام خود را بنویسید و «ورود با کد» را بزنید.');
+            onlineError('یوزرنیم اتاق وارد شد؛ نام خود را بنویسید و «ورود به اتاق» را بزنید.');
         }
     })();
 
