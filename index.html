@@ -614,6 +614,86 @@
         .about-modal .modal-close {
             margin-top: 16px;
         }
+
+        /* ===== Online help button + popup ===== */
+        .help-btn {
+            background: rgba(255,255,255,0.05);
+            color: var(--accent-color);
+            border: 1px solid rgba(243, 156, 18, 0.3);
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+        }
+        .help-btn:hover { background: rgba(243, 156, 18, 0.15); }
+        .help-btn .chev { font-size: 1.2rem; line-height: 1; }
+
+        .help-modal .modal-content {
+            width: 92%;
+            max-width: 440px;
+            max-height: 88vh;
+            max-height: 88dvh;
+            display: flex;
+            flex-direction: column;
+            text-align: right;
+            padding: 16px;
+        }
+        .help-modal h2 {
+            font-size: 1.05rem;
+            color: var(--accent-color);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+        }
+        .help-body {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
+            font-size: 0.84rem;
+            line-height: 1.9;
+            color: #d0d0d8;
+        }
+        .help-body, .help-body * {
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        .help-body h3 {
+            font-size: 0.92rem;
+            color: var(--accent-color);
+            margin: 14px 0 6px;
+        }
+        .help-body h3:first-child { margin-top: 0; }
+        .help-body p { margin-bottom: 6px; }
+        .help-body ol, .help-body ul { padding-right: 22px; padding-left: 4px; }
+        .help-body ol { list-style-type: decimal; list-style-type: persian; }
+        .help-body li { margin-bottom: 4px; }
+        .help-body strong { color: #fff; }
+        .help-body code {
+            direction: ltr;
+            unicode-bidi: embed;
+            font-family: monospace;
+            color: var(--accent-color);
+            background: rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 4px;
+            padding: 0 5px;
+            white-space: nowrap;
+        }
+        .help-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+        .help-table td {
+            border: 1px solid rgba(255,255,255,0.1);
+            padding: 6px 8px;
+            vertical-align: top;
+        }
+        .help-table td:first-child { width: 38%; color: #fff; background: rgba(0,0,0,0.25); }
+        .help-modal .modal-close { margin-top: 12px; flex-shrink: 0; }
     </style>
 </head>
 <body class="theme-classic">
@@ -751,7 +831,12 @@
     </div>
 
     <div class="info-card">
-        <button class="accordion-btn" onclick="toggleTutorial()">
+        <button class="help-btn" id="online-help-btn" onclick="openHelpModal()">
+            <span>🌐 آموزش بازی آنلاین (دو گوشی)</span>
+            <span class="chev">‹</span>
+        </button>
+
+        <button class="accordion-btn" id="tutorial-btn" onclick="toggleTutorial()">
             <span>🎓 آموزش بازی شطرنج</span>
             <span class="arrow">▼</span>
         </button>
@@ -806,6 +891,66 @@
             <div>اینستاگرام: <a href="https://instagram.com/behnamjooj" target="_blank"><svg class="instagram-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="20" height="20" rx="5" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="4.5" stroke="currentColor" stroke-width="2"/><circle cx="17.5" cy="6.5" r="1.2" fill="currentColor"/></svg>behnamjooj</a></div>
         </div>
         <button class="btn-primary modal-close" onclick="closeAboutModal()">بستن</button>
+    </div>
+</div>
+
+<div id="help-modal" class="modal-overlay help-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="modal-content">
+        <h2 id="help-title">🌐 راهنمای بازی آنلاین</h2>
+        <div class="help-body">
+            <p>دو نفر، هرکدام روی گوشی خودشان، با هم شطرنج بازی می‌کنند. هر دو نفر باید اینترنت (و در صورت نیاز VPN) داشته باشند و <strong>لینک بازی</strong> را باز کنند.</p>
+
+            <h3>👤 نفر اول (میزبان)</h3>
+            <ol>
+                <li>«حالت بازی» را روی <strong>آنلاین (دو گوشی)</strong> بگذارید.</li>
+                <li>نام خود را بنویسید (این نام به حریف نشان داده می‌شود؛ فارسی هم می‌شود).</li>
+                <li>دکمه‌ی <strong>ساخت اتاق</strong> را بزنید.</li>
+                <li>یک <strong>یوزرنیم اتاق</strong> انتخاب کنید: ۳ تا ۲۰ کاراکتر، فقط حروف انگلیسی، عدد، <code>-</code> و <code>_</code> (مثلاً <code>behnamjooj</code>). اگر خالی بگذارید، خودکار ساخته می‌شود.</li>
+                <li>دوباره <strong>ساخت اتاق</strong> را بزنید.</li>
+                <li>با <strong>کپی یوزرنیم</strong> یا <strong>اشتراک</strong> آن را برای دوستتان بفرستید (مثلاً در واتساپ).</li>
+                <li><strong>صفحه را باز نگه دارید</strong> تا حریف وصل شود.</li>
+            </ol>
+
+            <h3>👥 نفر دوم (مهمان)</h3>
+            <ol>
+                <li>لینک بازی را باز کنید و حالت را روی <strong>آنلاین (دو گوشی)</strong> بگذارید. اگر دوستتان «اشتراک» زده باشد، با باز کردن آن لینک، حالت آنلاین و یوزرنیم خودکار وارد می‌شود.</li>
+                <li>نام خود را بنویسید.</li>
+                <li><strong>ورود به اتاق</strong> را بزنید.</li>
+                <li>یوزرنیمی که دوستتان فرستاده را وارد کنید و <strong>اتصال</strong> را بزنید.</li>
+            </ol>
+
+            <h3>♟ در حین بازی</h3>
+            <ul>
+                <li>میزبان <strong>سفید</strong> است و اول حرکت می‌کند. مهمان <strong>سیاه</strong> است و صفحه برایش از دید سیاه (برعکس) نمایش داده می‌شود.</li>
+                <li>نام هر دو بازیکن، با وضعیت <strong>آنلاین/قطع</strong>، بالا و پایین صفحه دیده می‌شود.</li>
+                <li>فقط در نوبت خودتان می‌توانید حرکت کنید. حرکت‌ها همان لحظه روی گوشی حریف ظاهر می‌شود.</li>
+                <li><strong>بازی جدید:</strong> برای شروع دوباره، حریف باید قبول کند. در بازی بعدی رنگ‌ها جابه‌جا می‌شوند.</li>
+                <li><strong>خروج:</strong> شما را از اتاق بیرون می‌برد و یوزرنیم را آزاد می‌کند.</li>
+            </ul>
+
+            <h3>🔌 اگر اتصال قطع شد</h3>
+            <ul>
+                <li>اگر مهمان قطع شود، چند بار خودکار دوباره وصل می‌شود و بازی از همان‌جا ادامه پیدا می‌کند.</li>
+                <li>اگر <strong>میزبان</strong> صفحه را ببندد، اتاق از بین می‌رود و باید دوباره ساخته شود.</li>
+            </ul>
+
+            <h3>🛠 مشکلات رایج</h3>
+            <table class="help-table">
+                <tr><td>«اتاقی با این یوزرنیم پیدا نشد»</td><td>یوزرنیم را دوباره بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.</td></tr>
+                <tr><td>«این یوزرنیم توسط شخص دیگری استفاده می‌شود»</td><td>یوزرنیم دیگری انتخاب کنید. اگر خودتان تازه صفحه را بسته‌اید، حدود یک دقیقه صبر کنید.</td></tr>
+                <tr><td>«این اتاق قبلاً پر شده است»</td><td>در آن اتاق دو نفر مشغول بازی‌اند؛ با میزبان هماهنگ کنید.</td></tr>
+                <tr><td>«ارتباط با سرور برقرار نشد»</td><td>اینترنت/VPN را بررسی کنید.</td></tr>
+                <tr><td>یوزرنیم پذیرفته نمی‌شود</td><td>فقط از حروف انگلیسی، عدد، <code>-</code> و <code>_</code> استفاده کنید (حداقل ۳ کاراکتر).</td></tr>
+                <tr><td>وصل نمی‌شود ولی خطا هم نمی‌دهد</td><td>روی بعضی اینترنت‌های موبایل اتصال مستقیم برقرار نمی‌شود. یکی از دو نفر به وای‌فای وصل شود یا VPN را عوض کند.</td></tr>
+            </table>
+
+            <h3>💡 نکات</h3>
+            <ul>
+                <li>یوزرنیم اتاق عمومی است؛ اسم خاص‌تر (مثلاً <code>behnam-jooj</code>) از ورود ناخواسته‌ی دیگران جلوگیری می‌کند.</li>
+                <li>ساعت شطرنج ندارد؛ زمان فکر کردن محدود نیست.</li>
+            </ul>
+        </div>
+        <button class="btn-primary modal-close" onclick="closeHelpModal()">متوجه شدم</button>
     </div>
 </div>
 
@@ -1752,6 +1897,7 @@ function findBestMove(engine, level) {
     }
 
     function showPromotionModal(color) {
+        leaveFullscreenForModal();
         const modal = document.getElementById('promotion-modal');
         const container = document.getElementById('promotion-options');
         const style = document.getElementById('piece-style').value;
@@ -1877,9 +2023,42 @@ function findBestMove(engine, level) {
         btn.innerText = isFs ? '⛶ خروج از تمام صفحه' : '⛶ تمام صفحه';
     }
 
+    // Fullscreen only renders #game-container; the popups are siblings of it, so they would be
+    // hidden behind a fullscreen container. Leave fullscreen before showing any popup.
+    function leaveFullscreenForModal() {
+        const fs = document.fullscreenElement || document.webkitFullscreenElement;
+        if (!fs) return;
+        try {
+            const exit = document.exitFullscreen || document.webkitExitFullscreen;
+            const r = exit && exit.call(document);
+            if (r && r.catch) r.catch(() => {});
+        } catch (e) {}
+    }
+
     function openAboutModal() {
+        leaveFullscreenForModal();
         document.getElementById('about-modal').style.display = 'flex';
     }
+
+    function openHelpModal() {
+        leaveFullscreenForModal();
+        const m = document.getElementById('help-modal');
+        m.style.display = 'flex';
+        const body = m.querySelector('.help-body');
+        if (body) body.scrollTop = 0;
+        document.body.style.overflow = 'hidden';
+    }
+    function closeHelpModal() {
+        document.getElementById('help-modal').style.display = 'none';
+        document.body.style.overflow = '';
+    }
+    (function initHelpModal() {
+        const m = document.getElementById('help-modal');
+        m.addEventListener('click', (e) => { if (e.target === m) closeHelpModal(); });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && m.style.display !== 'none') closeHelpModal();
+        });
+    })();
 
     function closeAboutModal() {
         document.getElementById('about-modal').style.display = 'none';
@@ -1908,7 +2087,7 @@ function findBestMove(engine, level) {
     }
 
     function toggleTutorial() {
-        const btn = document.querySelector('.accordion-btn');
+        const btn = document.getElementById('tutorial-btn');
         const content = document.getElementById('tutorial-content');
         
         btn.classList.toggle('active');
@@ -2339,6 +2518,7 @@ function findBestMove(engine, level) {
 
     // ---------- Confirm modal ----------
     function askConfirm(text, onYes, onNo) {
+        leaveFullscreenForModal();
         $id('confirm-text').innerText = text;
         $id('confirm-modal').style.display = 'flex';
         $id('confirm-yes').onclick = () => { $id('confirm-modal').style.display = 'none'; onYes && onYes(); };
