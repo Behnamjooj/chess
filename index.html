@@ -830,6 +830,7 @@
                 </div>
             </div>
             <div class="online-hint" id="online-error" style="color:#ff8a80"></div>
+            <pre id="online-diag" style="display:none;direction:ltr;text-align:left;font-size:10px;line-height:1.4;color:#8ecbff;white-space:pre-wrap;word-break:break-all;margin-top:6px;user-select:text;-webkit-user-select:text"></pre>
         </div>
         <button class="btn-primary" id="btn-new-game" onclick="resetGame()">شروع بازی جدید</button>
     </div>
@@ -998,6 +999,16 @@
 </div>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+if (typeof Peer === 'undefined') {
+    document.write('<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"><\/script>');
+}
+</script>
+<script>
+if (typeof Peer === 'undefined') {
+    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"><\/script>');
+}
+</script>
 <script>
 var ChessEngine = function() {
   var WHITE = 'w', BLACK = 'b';
@@ -2093,7 +2104,7 @@ function findBestMove(engine, level) {
     function onModeChange() {
         const mode = document.getElementById('game-mode').value;
         document.getElementById('difficulty-group').querySelector('select').disabled = (mode !== 'pve');
-        if (mode !== 'online') onlineTeardown(true);
+        if (mode !== 'online') { clearHostSession(); onlineTeardown(true); }
         applyOnlineUI();
         resetGame();
     }
@@ -2242,6 +2253,115 @@ function findBestMove(engine, level) {
         return true;
     }
 
+    // ---------- Shared state / helpers for robust signalling ----------
+    const DEBUG_ON = /[?&]debug=1/.test(location.search) || (function () {
+        try { return localStorage.getItem('chess_debug') === '1'; } catch (e) { return false; }
+    })();
+    const diagLines = [];
+    function diag(msg) {
+        try { console.log('[chess]', msg); } catch (e) {}
+        if (!DEBUG_ON) return;
+        diagLines.push(new Date().toTimeString().slice(0, 8) + ' ' + msg);
+        if (diagLines.length > 14) diagLines.shift();
+        const el = $id('online-diag');
+        if (el) { el.style.display = 'block'; el.textContent = diagLines.join('\n'); }
+    }
+
+    // TURN relay: needed when both phones are behind CGNAT / symmetric NAT (typical on mobile data).
+    // PeerJS discontinued its free public TURN, so STUN alone often cannot connect two mobile networks.
+    // Fill this with your own TURN (Metered, Cloudflare Realtime TURN, Twilio, self-hosted coturn...), e.g.:
+    //   { urls: 'turn:YOUR_HOST:3478', username: 'USER', credential: 'PASS' }
+    const EXTRA_ICE_SERVERS = [];
+
+    function makePeer(id) {
+        const opts = { debug: DEBUG_ON ? 2 : 1 };
+        if (EXTRA_ICE_SERVERS.length) {
+            opts.config = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:global.stun.twilio.com:3478' }
+                ].concat(EXTRA_ICE_SERVERS),
+                sdpSemantics: 'unified-plan'
+            };
+        }
+        return id ? new Peer(id, opts) : new Peer(opts);
+    }
+
+    let hostCode = '';            // room code the host wants to keep alive
+    let hostCustom = false;
+    let hostWanted = false;       // true from room creation until the host leaves/cancels
+    let hostUnavailRetries = 0;
+    let restoredNote = false;
+    let pendingRestoreLog = null;
+    let signalTimer = null;
+    let watchdogTimer = null;
+    let pingTimer = null;
+    let lastRecv = 0;
+    let wakeLock = null;
+    let joinDeadline = 0;
+    let sawPeerUnavailable = false;
+    let guestReconnectTimer = null;
+
+    function clearSignalTimer() { if (signalTimer) { clearTimeout(signalTimer); signalTimer = null; } }
+
+    // Screen Wake Lock: stops the phone's auto-lock from suspending the page while waiting/playing.
+    async function acquireWake() {
+        try {
+            if (!('wakeLock' in navigator) || wakeLock || document.visibilityState !== 'visible') return;
+            wakeLock = await navigator.wakeLock.request('screen');
+            wakeLock.addEventListener('release', () => { wakeLock = null; });
+        } catch (e) { wakeLock = null; }
+    }
+    function releaseWake() { try { if (wakeLock) wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+    // Host session survives a killed/reloaded tab (e.g. after switching to WhatsApp for a while).
+    const HOST_SESSION_KEY = 'chess_host_session';
+    const HOST_SESSION_TTL = 3 * 3600 * 1000;
+    function saveHostSession() {
+        if (!(isHost && hostWanted && hostCode)) return;
+        try {
+            localStorage.setItem(HOST_SESSION_KEY, JSON.stringify({
+                code: hostCode, name: myName, color: myColor, log: moveLog, ts: Date.now()
+            }));
+        } catch (e) {}
+    }
+    function clearHostSession() { try { localStorage.removeItem(HOST_SESSION_KEY); } catch (e) {} }
+    function loadHostSession() {
+        try {
+            const x = JSON.parse(localStorage.getItem(HOST_SESSION_KEY) || 'null');
+            if (!x || !x.code || (Date.now() - (x.ts || 0)) > HOST_SESSION_TTL) return null;
+            return x;
+        } catch (e) { return null; }
+    }
+
+    // Re-establish the link to the signalling server whenever it was lost (backgrounded tab,
+    // screen lock, network switch). Without this the room ID disappears from the server and
+    // the friend gets "room not found".
+    function ensureSignaling() {
+        if (isHost) {
+            if (!hostWanted) return;
+            if (!peer || peer.destroyed) { startHostPeer(); return; }
+        }
+        if (peer && !peer.destroyed && peer.disconnected) {
+            try { peer.reconnect(); diag('reconnect() called'); }
+            catch (e) { diag('reconnect failed: ' + (e && e.message)); }
+        }
+    }
+    function startWatchdog() {
+        if (watchdogTimer) return;
+        watchdogTimer = setInterval(() => {
+            if (document.visibilityState === 'visible') ensureSignaling();
+        }, 4000);
+    }
+    function stopWatchdog() { if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; } }
+
+    const SOFT_ERRORS = ['network', 'server-error', 'socket-error', 'socket-closed', 'webrtc', 'disconnected'];
+    function softErrorMessage(type) {
+        if (type === 'webrtc') return 'اتصال مستقیم با حریف برقرار نشد؛ تلاش ادامه دارد...';
+        return 'ارتباط با سرور واسط قطع شد؛ در حال اتصال مجدد...';
+    }
+
     // ---------- Host ----------
     function onlineShowCreate() {
         onlineError('');
@@ -2250,7 +2370,7 @@ function findBestMove(engine, level) {
         $id('room-username-input').focus();
     }
 
-    function onlineCreateRoom(retry) {
+    function onlineCreateRoom() {
         onlineError('');
         if (!readMyName()) return;
         if (!ensurePeerLib()) return;
@@ -2264,32 +2384,119 @@ function findBestMove(engine, level) {
         onlineTeardown(true);
         isHost = true;
         myColor = 'w';
+        hostCode = code;
+        hostCustom = customRoom;
+        hostWanted = true;
+        hostUnavailRetries = 0;
         $id('room-code-display').innerText = code;
-        $id('wait-status').innerText = '⏳ در حال ایجاد اتاق...';
+        $id('wait-status').innerText = '⏳ در حال اتصال به سرور...';
         showOnlineStep('wait');
+        acquireWake();
+        startWatchdog();
+        startHostPeer();
+        saveHostSession();
+    }
 
-        peer = new Peer(PEER_PREFIX + code);
-        peer.on('open', () => {
-            $id('wait-status').innerText = '⏳ در انتظار اتصال حریف...';
+    function startHostPeer() {
+        if (!hostWanted || !hostCode) return;
+        if (peer && !peer.destroyed) { try { peer.destroy(); } catch (e) {} }
+        clearSignalTimer();
+        const myPeer = makePeer(PEER_PREFIX + hostCode);
+        peer = myPeer;
+        diag('host: creating ' + hostCode);
+
+        signalTimer = setTimeout(() => {
+            if (peer === myPeer && !myPeer.open && hostWanted && !onlineActive) {
+                diag('host: signalling timeout');
+                onlineError('سرور واسط (PeerJS) پاسخ نداد. اینترنت/VPN را بررسی کنید؛ برنامه خودکار دوباره تلاش می‌کند.');
+            }
+        }, 12000);
+
+        myPeer.on('open', (id) => {
+            if (peer !== myPeer) return;
+            clearSignalTimer();
+            diag('host: open ' + id);
+            hostUnavailRetries = 0;
+            if (!onlineActive) {
+                $id('wait-status').innerText = restoredNote
+                    ? '♻️ اتاق قبلی شما بازسازی شد؛ در انتظار حریف...'
+                    : '⏳ در انتظار اتصال حریف...';
+                restoredNote = false;
+                onlineError('');
+            } else {
+                onlineError('');
+            }
+            saveHostSession();
         });
-        peer.on('connection', (c) => {
-            if (conn && conn.open) { c.on('open', () => { c.send({ t: 'busy' }); setTimeout(() => c.close(), 300); }); return; }
-            attachConn(c);
-        });
-        peer.on('error', (err) => {
-            if (err && err.type === 'unavailable-id') {
-                if (!customRoom && (retry || 0) < 3) {
-                    onlineCreateRoom((retry || 0) + 1);  // rare collision of an auto-generated name → new one
-                    return;
-                }
-                onlineTeardown(true);
-                onlineError('این یوزرنیم همین الان توسط شخص دیگری استفاده می‌شود؛ یکی دیگر انتخاب کنید. (اگر خودتان بودید و تازه صفحه را بستید، حدود یک دقیقه صبر کنید.)');
-                showOnlineStep('create');
+
+        myPeer.on('connection', (c) => {
+            if (peer !== myPeer) return;
+            const alive = conn && conn.open && (Date.now() - lastRecv < 15000);
+            if (alive) {
+                c.on('open', () => { c.send({ t: 'busy' }); setTimeout(() => c.close(), 300); });
                 return;
             }
-            handlePeerError(err, 'create');
+            // stale/dead previous connection (guest reloaded or lost network) → replace it
+            if (conn) { const old = conn; conn = null; try { old.close(); } catch (e) {} }
+            diag('host: incoming connection accepted');
+            attachConn(c);
         });
-        peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
+
+        myPeer.on('error', (err) => {
+            if (peer !== myPeer) return;
+            handleHostPeerError(err);
+        });
+
+        myPeer.on('disconnected', () => {
+            if (peer !== myPeer) return;
+            diag('host: lost signalling');
+            setTimeout(ensureSignaling, 500);
+        });
+    }
+
+    function giveUpHost(msg) {
+        clearHostSession();
+        onlineTeardown(true);
+        onlineError(msg);
+        showOnlineStep('create');
+    }
+
+    function handleHostPeerError(err) {
+        const type = err && err.type;
+        diag('host error: ' + type + (err && err.message ? ' | ' + err.message : ''));
+
+        if (type === 'unavailable-id') {
+            if (!hostCustom) {
+                if (hostUnavailRetries < 3) {            // rare collision of an auto-generated code
+                    hostUnavailRetries++;
+                    hostCode = genRoomCode();
+                    $id('room-code-display').innerText = hostCode;
+                    setTimeout(() => { if (hostWanted && (!peer || peer.destroyed)) startHostPeer(); }, 300);
+                    return;
+                }
+                giveUpHost('ساخت اتاق ناموفق بود؛ دوباره تلاش کنید.');
+                return;
+            }
+            // custom name: probably OUR OWN previous registration that the server has not expired yet
+            if (hostUnavailRetries < 16) {
+                hostUnavailRetries++;
+                onlineError('این یوزرنیم هنوز روی سرور آزاد نشده (شاید از نشست قبلی خودتان)؛ تلاش مجدد خودکار... (' + hostUnavailRetries + ')');
+                setTimeout(() => { if (hostWanted && (!peer || peer.destroyed)) startHostPeer(); }, 5000);
+                return;
+            }
+            giveUpHost('این یوزرنیم همین الان توسط شخص دیگری استفاده می‌شود؛ یکی دیگر انتخاب کنید.');
+            return;
+        }
+
+        if (type === 'invalid-id' || type === 'browser-incompatible' || type === 'ssl-unavailable' || type === 'invalid-key') {
+            giveUpHost(peerErrorText(type));
+            return;
+        }
+
+        // Transient problems (socket closed because the tab was backgrounded, network switch...):
+        // NEVER tear the room down here – just reconnect. (Previously this destroyed the room.)
+        onlineError(softErrorMessage(type));
+        setTimeout(ensureSignaling, 1500);
     }
 
     // ---------- Guest ----------
@@ -2312,36 +2519,116 @@ function findBestMove(engine, level) {
         isHost = false;
         myColor = 'b';
         lastRoomCode = code;                 // remember the code we actually used
-        peer = new Peer();
-        peer.on('open', () => {
-            const c = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' });
-            attachConn(c);
+        joinDeadline = Date.now() + 60000;   // keep retrying for up to 60 s (host may be returning from WhatsApp)
+        sawPeerUnavailable = false;
+        acquireWake();
+        startWatchdog();
+        onlineError('⏳ در حال اتصال به سرور...');
+
+        const myPeer = makePeer();
+        peer = myPeer;
+        diag('guest: creating peer for room ' + code);
+
+        signalTimer = setTimeout(() => {
+            if (peer === myPeer && !myPeer.open && !onlineActive) {
+                diag('guest: signalling timeout');
+                onlineTeardown(true);
+                onlineError('سرور واسط (PeerJS) پاسخ نداد. اینترنت/VPN را بررسی کنید (سرور یا شبکه مشکل دارد، نه یوزرنیم).');
+                showOnlineStep('join');
+            }
+        }, 15000);
+
+        myPeer.on('open', (id) => {
+            if (peer !== myPeer) return;
+            clearSignalTimer();
+            diag('guest: open ' + id);
+            onlineError('⏳ در حال پیدا کردن اتاق...');
+            guestConnect(code);
             clearConnectTimer();
-            connectTimer = setTimeout(() => {
-                if (!onlineActive) {
-                    onlineError('اتصال برقرار نشد. یوزرنیم را بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.');
-                    onlineTeardown(true); showOnlineStep('join');
-                }
-            }, 15000);
+            connectTimer = setTimeout(onJoinTimeout, Math.max(1000, joinDeadline - Date.now()));
         });
-        peer.on('error', handlePeerError);
-        peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
+        myPeer.on('error', (err) => {
+            if (peer !== myPeer) return;
+            handleGuestPeerError(err, myPeer);
+        });
+        myPeer.on('disconnected', () => {
+            if (peer !== myPeer) return;
+            diag('guest: lost signalling');
+            setTimeout(ensureSignaling, 500);
+        });
     }
+
+    function guestConnect(code) {
+        if (!peer || peer.destroyed) return;
+        if (peer.disconnected) { ensureSignaling(); return; }
+        diag('guest: connecting to ' + code);
+        const c = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' });
+        if (c) attachConn(c);
+    }
+
+    function onJoinTimeout() {
+        if (onlineActive) return;
+        diag('guest: join timeout (sawPeerUnavailable=' + sawPeerUnavailable + ')');
+        const msg = sawPeerUnavailable
+            ? 'اتاقی با این یوزرنیم پیدا نشد. یوزرنیم را بررسی کنید و از میزبان بخواهید صفحه‌ی بازی را باز و روشن نگه دارد.'
+            : 'اتاق روی سرور پیدا شد ولی اتصال مستقیم دو گوشی برقرار نشد (معمولاً به‌خاطر NAT یا فیلتر). یکی از دو نفر وای‌فای یا VPN را عوض کند.';
+        onlineTeardown(true);
+        onlineError(msg);
+        showOnlineStep('join');
+    }
+
+    function handleGuestPeerError(err, myPeer) {
+        const type = err && err.type;
+        diag('guest error: ' + type + (err && err.message ? ' | ' + err.message : ''));
+
+        if (type === 'peer-unavailable') {
+            sawPeerUnavailable = true;
+            if (onlineActive) {
+                onlineError('میزبان هنوز وصل نیست؛ تلاش مجدد خودکار...');
+                return;                              // attemptGuestReconnect keeps trying
+            }
+            if (Date.now() < joinDeadline) {
+                const left = Math.ceil((joinDeadline - Date.now()) / 1000);
+                onlineError('اتاق هنوز پیدا نشد؛ شاید میزبان در حال برگشت به صفحه است. تلاش مجدد خودکار... (' + left + ' ثانیه)');
+                setTimeout(() => {
+                    if (peer === myPeer && !onlineActive && !(conn && conn.open)) guestConnect(lastRoomCode);
+                }, 3000);
+                return;
+            }
+            handlePeerError(err);
+            return;
+        }
+
+        const wasOpen = myPeer.open || myPeer.disconnected;
+        if (SOFT_ERRORS.indexOf(type) !== -1 && wasOpen) {
+            onlineError(softErrorMessage(type));
+            setTimeout(ensureSignaling, 1500);
+            return;
+        }
+        handlePeerError(err);
+    }
+
     let connectTimer = null;
     function clearConnectTimer() { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } }
 
+    function peerErrorText(type) {
+        if (type === 'peer-unavailable') return 'اتاقی با این یوزرنیم پیدا نشد. یوزرنیم را دوباره بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.';
+        if (type === 'invalid-id') return 'یوزرنیم اتاق پذیرفته نشد؛ فقط از حروف انگلیسی، عدد، - و _ استفاده کنید.';
+        if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed')
+            return 'ارتباط با سرور برقرار نشد. اینترنت/VPN را بررسی کنید.';
+        if (type === 'browser-incompatible') return 'مرورگر شما از WebRTC پشتیبانی نمی‌کند.';
+        if (type === 'ssl-unavailable' || type === 'invalid-key') return 'سرور واسط در دسترس نیست.';
+        return 'خطای اتصال: ' + (type || 'نامشخص');
+    }
+
     function handlePeerError(err, hostStep) {
         const type = err && err.type;
-        let msg = 'خطای اتصال: ' + (type || 'نامشخص');
-        if (type === 'peer-unavailable') msg = 'اتاقی با این یوزرنیم پیدا نشد. یوزرنیم را دوباره بررسی کنید و مطمئن شوید میزبان صفحه را باز نگه داشته است.';
-        else if (type === 'invalid-id') msg = 'یوزرنیم اتاق پذیرفته نشد؛ فقط از حروف انگلیسی، عدد، - و _ استفاده کنید.';
-        else if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed')
-            msg = 'ارتباط با سرور برقرار نشد. اینترنت/VPN را بررسی کنید.';
-        else if (type === 'browser-incompatible') msg = 'مرورگر شما از WebRTC پشتیبانی نمی‌کند.';
-        onlineError(msg);
+        diag('fatal-ish error: ' + type);
+        onlineError(peerErrorText(type));
         if (!onlineActive) {
             const wasHost = isHost;
             onlineTeardown(true);
+            onlineError(peerErrorText(type));
             showOnlineStep(wasHost ? 'create' : 'join');
         }
     }
@@ -2350,17 +2637,36 @@ function findBestMove(engine, level) {
     function attachConn(c) {
         conn = c;
         c.on('open', () => {
+            if (conn !== c) return;
+            lastRecv = Date.now();
+            diag('data channel open');
             // both sides introduce themselves
             c.send({ t: 'hello', name: myName, color: myColor, isHost: isHost, v: 1 });
+            startPing();
         });
-        c.on('data', onlineOnData);
-        c.on('close', onPeerLeft);
-        c.on('error', () => onPeerLeft());
+        c.on('data', (m) => { lastRecv = Date.now(); onlineOnData(m); });
+        c.on('close', () => { if (conn === c) onPeerLeft(); });
+        c.on('error', () => { if (conn === c) onPeerLeft(); });
     }
 
     function onlineSend(obj) {
         if (conn && conn.open) { try { conn.send(obj); } catch (e) {} }
     }
+
+    // Heartbeat: detects a dead data channel quickly, so a reconnecting friend is not rejected as "room full".
+    function startPing() {
+        if (pingTimer) return;
+        pingTimer = setInterval(() => {
+            if (!(conn && conn.open)) return;
+            onlineSend({ t: 'ping' });
+            if (onlineActive && peerOnline && (Date.now() - lastRecv) > 20000) {
+                diag('heartbeat timeout');
+                try { conn.close(); } catch (e) {}
+                if (peerOnline) onPeerLeft();
+            }
+        }, 5000);
+    }
+    function stopPing() { if (pingTimer) { clearInterval(pingTimer); pingTimer = null; } }
 
     function onPeerLeft() {
         if (!onlineActive) return;
@@ -2377,14 +2683,14 @@ function findBestMove(engine, level) {
     let reconnectTries = 0;
     function attemptGuestReconnect() {
         const code = lastRoomCode;
-        if (!code || reconnectTries >= 6) return;
+        if (!code || reconnectTries >= 10 || guestReconnectTimer) return;
         reconnectTries++;
-        setTimeout(() => {
+        guestReconnectTimer = setTimeout(() => {
+            guestReconnectTimer = null;
             if (!peer || peer.destroyed || (conn && conn.open)) return;
             try {
-                const c = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'json' });
-                attachConn(c);
-                setTimeout(() => { if (!(conn && conn.open)) attemptGuestReconnect(); }, 5000);
+                guestConnect(code);
+                setTimeout(() => { if (!(conn && conn.open)) attemptGuestReconnect(); }, 6000);
             } catch (e) {}
         }, 2500);
     }
@@ -2392,8 +2698,13 @@ function findBestMove(engine, level) {
 
     function onlineOnData(m) {
         if (!m || typeof m !== 'object') return;
+        if (m.t === 'ping') return;
 
         if (m.t === 'busy') {
+            if (onlineActive) {                       // we are only re-connecting: host still sees our old link → retry
+                onlineError('در حال اتصال مجدد...');
+                return;
+            }
             onlineError('این اتاق قبلاً پر شده است.');
             onlineTeardown(true); showOnlineStep('join'); return;
         }
@@ -2406,9 +2717,17 @@ function findBestMove(engine, level) {
             reconnectTries = 0;
             clearConnectTimer();
 
+            // guest always takes the colour opposite to the host (stays correct after colour swaps / reloads)
+            if (!isHost && m.isHost === true && (m.color === 'w' || m.color === 'b')) {
+                myColor = (m.color === 'w') ? 'b' : 'w';
+            }
+
             if (first) {
                 game.reset(); moveLog = []; lastMoveOnline = null; selectedSquare = null; gameOverNotified = false;
+                if (isHost && pendingRestoreLog && pendingRestoreLog.length) rebuildFromLog(pendingRestoreLog);
+                pendingRestoreLog = null;
             }
+            acquireWake();
             showOnlineStep('playing');
             $id('players-top').classList.add('show');
             $id('players-bottom').classList.add('show');
@@ -2632,6 +2951,7 @@ function findBestMove(engine, level) {
     // ---------- Leave / teardown ----------
     function onlineLeave() {
         onlineSend({ t: 'bye' });
+        clearHostSession();
         onlineTeardown(true);
         showOnlineStep('name');
         applyOnlineUI();
@@ -2644,9 +2964,15 @@ function findBestMove(engine, level) {
         peerOnline = false;
         oppName = '';
         pendingNewGameFromMe = false;
+        hostWanted = false;
         reconnectTries = 99;
         clearConnectTimer();
-        try { if (conn) { conn.close(); } } catch (e) {}
+        clearSignalTimer();
+        stopPing();
+        stopWatchdog();
+        if (guestReconnectTimer) { clearTimeout(guestReconnectTimer); guestReconnectTimer = null; }
+        releaseWake();
+        try { if (conn) { const oldConn = conn; conn = null; oldConn.close(); } } catch (e) {}
         try { if (peer && !peer.destroyed) peer.destroy(); } catch (e) {}
         conn = null; peer = null;
         $id('players-top').classList.remove('show');
@@ -2656,11 +2982,38 @@ function findBestMove(engine, level) {
 
     window.addEventListener('beforeunload', () => { onlineSend({ t: 'bye' }); });
 
+    // ---------- Lifecycle: coming back from WhatsApp / unlocking the phone / network change ----------
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            diag('page visible');
+            if (hostWanted || onlineActive || peer) acquireWake();
+            setTimeout(ensureSignaling, 200);
+            if (!isHost && onlineActive && !(conn && conn.open)) { reconnectTries = 0; attemptGuestReconnect(); }
+        } else {
+            saveHostSession();
+        }
+    });
+    window.addEventListener('pageshow', () => setTimeout(ensureSignaling, 200));
+    window.addEventListener('online', () => { diag('network online'); setTimeout(ensureSignaling, 500); });
+    window.addEventListener('pagehide', saveHostSession);
+    setInterval(saveHostSession, 5000);
+
     // ---------- Init: restore name, ?room=CODE deep link ----------
     (function initOnline() {
         try { const n = localStorage.getItem('chess_my_name'); if (n) $id('my-name-input').value = n; } catch (e) {}
         const q = new URLSearchParams(location.search).get('room');
-        if (q) {
+        const hs = q ? null : loadHostSession();
+        if (hs) {
+            // the host's tab was killed/reloaded while waiting or playing → re-open the same room
+            $id('game-mode').value = 'online';
+            onModeChange();
+            $id('my-name-input').value = hs.name || $id('my-name-input').value;
+            $id('room-username-input').value = hs.code;
+            pendingRestoreLog = Array.isArray(hs.log) ? hs.log : null;
+            restoredNote = true;
+            onlineCreateRoom();
+            if (hs.color === 'w' || hs.color === 'b') myColor = hs.color;
+        } else if (q) {
             const code = normRoomName(q).slice(0, ROOM_MAX);
             $id('game-mode').value = 'online';
             $id('join-code-input').value = code;
