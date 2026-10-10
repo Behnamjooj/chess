@@ -2267,25 +2267,94 @@ function findBestMove(engine, level) {
         if (el) { el.style.display = 'block'; el.textContent = diagLines.join('\n'); }
     }
 
-    // TURN relay: needed when both phones are behind CGNAT / symmetric NAT (typical on mobile data).
-    // PeerJS discontinued its free public TURN, so STUN alone often cannot connect two mobile networks.
-    // Fill this with your own TURN (Metered, Cloudflare Realtime TURN, Twilio, self-hosted coturn...), e.g.:
-    //   { urls: 'turn:YOUR_HOST:3478', username: 'USER', credential: 'PASS' }
+    // ---- TURN relay ----
+    // When one/both phones are behind CGNAT / symmetric NAT (typical for mobile data) or UDP is filtered,
+    // STUN alone cannot connect them; only a TURN relay can. PeerJS discontinued its free public TURN.
+    //
+    // Option A (recommended, free tier): sign up at https://dashboard.metered.ca , create a TURN app and
+    // paste the app name (the part before .metered.live) and the API key here. Credentials are fetched at page load.
+    const METERED_APP = '';       // e.g. 'mychessgame'
+    const METERED_API_KEY = '';   // e.g. 'abcdef123...'
+    //
+    // Option B: any other TURN (Cloudflare, Twilio, own coturn ...):
+    //   { urls: 'turn:HOST:3478', username: 'USER', credential: 'PASS' }
     const EXTRA_ICE_SERVERS = [];
+    //
+    // Fallback used only if neither A nor B is configured: the legacy public Open Relay credentials.
+    // Best effort only – Metered now asks for an API key, so these may be rate-limited or stop working.
+    const LEGACY_PUBLIC_TURN = [
+        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ];
+    let fetchedIce = null;
+    (function prefetchIce() {
+        if (!METERED_APP || !METERED_API_KEY || typeof fetch !== 'function') return;
+        let ctrl = null; try { ctrl = new AbortController(); } catch (e) {}
+        const t = setTimeout(() => { try { if (ctrl) ctrl.abort(); } catch (e) {} }, 6000);
+        fetch('https://' + METERED_APP + '.metered.live/api/v1/turn/credentials?apiKey=' + encodeURIComponent(METERED_API_KEY),
+              ctrl ? { signal: ctrl.signal } : undefined)
+            .then(r => r.json())
+            .then(arr => {
+                if (Array.isArray(arr) && arr.length) { fetchedIce = arr; diag('TURN credentials fetched: ' + arr.length + ' servers'); }
+                else diag('TURN fetch: unexpected response');
+            })
+            .catch(e => diag('TURN fetch failed: ' + (e && e.message)))
+            .then(() => clearTimeout(t));
+    })();
+    function hasOwnTurn() { return !!(fetchedIce || EXTRA_ICE_SERVERS.length); }
 
     function makePeer(id) {
-        const opts = { debug: DEBUG_ON ? 2 : 1 };
-        if (EXTRA_ICE_SERVERS.length) {
-            opts.config = {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:global.stun.twilio.com:3478' }
-                ].concat(EXTRA_ICE_SERVERS),
-                sdpSemantics: 'unified-plan'
-            };
-        }
+        const servers = [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+        ];
+        if (fetchedIce) fetchedIce.forEach(x => servers.push(x));
+        EXTRA_ICE_SERVERS.forEach(x => servers.push(x));
+        if (!hasOwnTurn()) LEGACY_PUBLIC_TURN.forEach(x => servers.push(x));
+        const opts = {
+            debug: DEBUG_ON ? 2 : 1,
+            config: { iceServers: servers, sdpSemantics: 'unified-plan', iceCandidatePoolSize: 2 }
+        };
         return id ? new Peer(id, opts) : new Peer(opts);
+    }
+
+    // Logs which ICE candidates were found (host / srflx = STUN worked / relay = TURN worked) and
+    // reports a failed direct connection immediately instead of after a long timeout.
+    function watchIce(c) {
+        let tries = 0;
+        const hook = () => {
+            const pc = c && c.peerConnection;
+            if (!pc) { if (tries++ < 30) setTimeout(hook, 100); return; }
+            if (pc.__chessWatched) return;
+            pc.__chessWatched = true;
+            const seen = { host: 0, srflx: 0, relay: 0, prflx: 0 };
+            pc.addEventListener('icecandidate', (ev) => {
+                if (ev.candidate && ev.candidate.candidate) {
+                    const m = / typ (\w+)/.exec(ev.candidate.candidate);
+                    if (m) seen[m[1]] = (seen[m[1]] || 0) + 1;
+                } else {
+                    diag('ICE gathering done: host=' + seen.host + ' srflx=' + seen.srflx + ' relay=' + seen.relay);
+                    if (!seen.srflx && !seen.relay) diag('WARNING: no srflx/relay candidates -> STUN/TURN unreachable (filtered?)');
+                }
+            });
+            pc.addEventListener('iceconnectionstatechange', () => {
+                diag('ICE state: ' + pc.iceConnectionState);
+                if (pc.iceConnectionState === 'failed' && conn === c && !onlineActive) onIceFailed(seen);
+            });
+        };
+        hook();
+    }
+    function onIceFailed(seen) {
+        const msg = 'اتصال مستقیم دو گوشی برقرار نشد (ICE failed). '
+            + (hasOwnTurn() ? 'حتی با TURN هم وصل نشد؛ VPN یا شبکه را عوض کنید.'
+                            : 'سرور TURN تنظیم نشده یا کار نمی‌کند؛ یکی از دو نفر وای‌فای/VPN را عوض کند یا TURN اضافه شود.');
+        if (isHost) { onlineError(msg); return; }      // host keeps waiting; the guest may retry
+        onlineTeardown(true);
+        onlineError(msg);
+        showOnlineStep('join');
     }
 
     let hostCode = '';            // room code the host wants to keep alive
@@ -2571,7 +2640,8 @@ function findBestMove(engine, level) {
         diag('guest: join timeout (sawPeerUnavailable=' + sawPeerUnavailable + ')');
         const msg = sawPeerUnavailable
             ? 'اتاقی با این یوزرنیم پیدا نشد. یوزرنیم را بررسی کنید و از میزبان بخواهید صفحه‌ی بازی را باز و روشن نگه دارد.'
-            : 'اتاق روی سرور پیدا شد ولی اتصال مستقیم دو گوشی برقرار نشد (معمولاً به‌خاطر NAT یا فیلتر). یکی از دو نفر وای‌فای یا VPN را عوض کند.';
+            : 'اتاق روی سرور پیدا شد ولی اتصال مستقیم دو گوشی برقرار نشد (معمولاً به‌خاطر NAT یا فیلتر'
+              + (hasOwnTurn() ? '). یکی از دو نفر وای‌فای یا VPN را عوض کند.' : ' و نبود TURN). TURN تنظیم کنید یا وای‌فای/VPN را عوض کنید.');
         onlineTeardown(true);
         onlineError(msg);
         showOnlineStep('join');
@@ -2636,6 +2706,7 @@ function findBestMove(engine, level) {
     // ---------- Connection ----------
     function attachConn(c) {
         conn = c;
+        watchIce(c);
         c.on('open', () => {
             if (conn !== c) return;
             lastRecv = Date.now();
